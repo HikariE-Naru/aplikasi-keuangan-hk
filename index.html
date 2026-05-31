@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Dompet Saya</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="assets/favicon-32.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="assets/icon-192.png">
+  <link rel="apple-touch-icon" href="assets/icon-192.png">
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#16a34a" />
+  <meta name="mobile-web-app-capable" content="yes">
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:#f8f9fb;min-height:100vh}
+  input,select{font-family:inherit}
+  button{font-family:inherit;cursor:pointer}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo } = React;
+
+const INCOME_CATEGORIES = ["Jualan","Dari Abi","Hadiah","Freelance","Lainnya"];
+const EXPENSE_CATEGORIES = ["Bensin","Wifi","Belajar","Hiburan","Belanja","Lainnya"];
+const TABS = ["Dashboard","Transaksi","RAB","Alokasi", "Ekspor"];
+const TAB_ICONS = {Dashboard:"🏠",Transaksi:"📋",RAB:"📚",Alokasi:"🏦",Ekspor:"💾"};
+
+const formatRp = n => "Rp" + Math.abs(n).toLocaleString("id-ID");
+const today = () => new Date().toISOString().slice(0,10);
+const monthKey = d => d.slice(0,7);
+const currentMonth = () => today().slice(0,7);
+const monthLabel = k => { const [y,m]=k.split("-"); return new Date(+y,+m-1).toLocaleDateString("id-ID",{month:"long",year:"numeric"}); };
+const RANGE_OPTIONS = [{key:"day",label:"1 Hari"},{key:"week",label:"1 Minggu"},{key:"month",label:"1 Bulan"},{key:"year",label:"1 Tahun"}];
+const parseIsoDate = s => new Date(s + "T00:00:00");
+const toDateKey = d => d.toISOString().slice(0,10);
+const startOfWeek = d => { const date = new Date(d); const day = date.getDay(); const diff = (day + 6) % 7; date.setDate(date.getDate() - diff); date.setHours(0,0,0,0); return date; };
+const addDays = (d,n) => { const date = new Date(d); date.setDate(date.getDate()+n); return date; };
+const addMonths = (d,n) => { const date = new Date(d); date.setMonth(date.getMonth()+n); return date; };
+const addYears = (d,n) => { const date = new Date(d); date.setFullYear(date.getFullYear()+n); return date; };
+const bucketKey = (tanggal,rangeKey) => {
+  const d = parseIsoDate(tanggal);
+  if(rangeKey === "day") return toDateKey(d);
+  if(rangeKey === "week") return toDateKey(startOfWeek(d));
+  if(rangeKey === "month") return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+  return String(d.getFullYear());
+};
+const bucketLabel = (key,rangeKey) => {
+  if(rangeKey === "day") return parseIsoDate(key).toLocaleDateString("id-ID",{weekday:"short",day:"numeric"});
+  if(rangeKey === "week") return parseIsoDate(key).toLocaleDateString("id-ID",{day:"numeric",month:"short"});
+  if(rangeKey === "month") {
+    const [y,m] = key.split("-"); return new Date(+y,+m-1,1).toLocaleDateString("id-ID",{month:"short",year:"2-digit"});
+  }
+  return key;
+};
+const rangeStart = (todayDate,rangeKey) => {
+  if(rangeKey === "day") return addDays(todayDate,-6);
+  if(rangeKey === "week") return addDays(startOfWeek(todayDate),-21);
+  if(rangeKey === "month") return addMonths(todayDate,-5);
+  return addYears(todayDate,-4);
+};
+const buildExpenseBuckets = (transactions,rangeKey) => {
+  const todayDate = new Date(); todayDate.setHours(0,0,0,0);
+  const start = rangeStart(todayDate,rangeKey);
+  const keys = [];
+  let cursor = new Date(start);
+  if(rangeKey === "day"){
+    for(let i=0;i<7;i++){ keys.push(toDateKey(cursor)); cursor = addDays(cursor,1); }
+  } else if(rangeKey === "week"){
+    for(let i=0;i<4;i++){ keys.push(toDateKey(cursor)); cursor = addDays(cursor,7); }
+  } else if(rangeKey === "month"){
+    for(let i=0;i<6;i++){ keys.push(`${cursor.getFullYear()}-${String(cursor.getMonth()+1).padStart(2,"0")}`); cursor = addMonths(cursor,1); }
+  } else {
+    for(let i=0;i<5;i++){ keys.push(String(cursor.getFullYear())); cursor = addYears(cursor,1); }
+  }
+  const totals = Object.fromEntries(keys.map(k=>[k,0]));
+  transactions.filter(t=>t.type==="expense").forEach(t=>{ const key = bucketKey(t.tanggal,rangeKey); if(key in totals) totals[key] += t.nominal; });
+  return keys.map(key=>({key,label:bucketLabel(key,rangeKey),amount:totals[key]}));
+};
+const rangeTotal = (transactions,rangeKey,type) => {
+  const todayDate = new Date(); todayDate.setHours(0,0,0,0);
+  const start = rangeStart(todayDate,rangeKey);
+  return transactions.filter(t=>t.type===type && parseIsoDate(t.tanggal) >= start).reduce((sum,t)=>sum+t.nominal,0);
+};
+const uid = () => Math.random().toString(36).slice(2,10);
+const load = (k,d) => { try { return JSON.parse(localStorage.getItem(k))??d; } catch { return d; } };
+const save = (k,v) => localStorage.setItem(k,JSON.stringify(v));
+
+const downloadBlob = (content, filename, type) => {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+const CSV_DELIMITER = ";";
+const CSV_BOM = "\uFEFF";
+
+const escapeCsv = value => {
+  const str = value == null ? "" : String(value);
+  return /["\n\r;]/.test(str) ? `"${str.replace(/"/g,'""')}"` : str;
+};
+
+const buildCsvSection = (rows, columns) => {
+  const header = columns.map(col => escapeCsv(col.label)).join(CSV_DELIMITER);
+  const lines = rows.map(row => columns.map(col => {
+    const value = typeof col.value === "function" ? col.value(row) : row[col.key];
+    return escapeCsv(value);
+  }).join(CSV_DELIMITER));
+  return [header, ...lines].join("\r\n");
+};
+
+const CAT_COLORS = {
+  "Jualan":"#16a34a","Dari Abi":"#2563eb","Hadiah":"#d97706",
+  "Freelance":"#7c3aed","Lainnya":"#6b7280",
+  "Bensin":"#ef4444","Wifi":"#f97316",
+  "Belajar":"#0ea5e9","Hiburan":"#8b5cf6","Belanja":"#14b8a6",
+};
+
+function Badge({type}){
+  const inc=type==="income";
+  return <span style={{fontSize:11,fontWeight:600,padding:"2px 8px",borderRadius:99,background:inc?"#dcfce7":"#fee2e2",color:inc?"#15803d":"#dc2626"}}>{inc?"Masuk":"Keluar"}</span>;
+}
+
+function Modal({title,onClose,children}){
+  return (
+    <div style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",display:"flex",alignItems:"flex-end",justifyContent:"center",zIndex:100}} onClick={e=>e.target===e.currentTarget&&onClose()}>
+      <div style={{background:"#fff",borderRadius:"20px 20px 0 0",width:"100%",maxWidth:560,maxHeight:"92vh",overflowY:"auto",padding:"24px 20px 40px"}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+          <h2 style={{margin:0,fontSize:17,fontWeight:700,color:"#111"}}>{title}</h2>
+          <button onClick={onClose} style={{background:"#f3f4f6",border:"none",borderRadius:99,width:32,height:32,fontSize:18,color:"#374151"}}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+const inputStyle = {width:"100%",padding:"10px 12px",borderRadius:10,border:"1.5px solid #e5e7eb",fontSize:15,color:"#111",background:"#f9fafb",boxSizing:"border-box",outline:"none"};
+
+function Field({label,children}){
+  return <div style={{marginBottom:14}}>{label&&<label style={{display:"block",fontSize:13,color:"#4b5563",marginBottom:5,fontWeight:500}}>{label}</label>}{children}</div>;
+}
+
+function Btn({children,variant="primary",style:s,...props}){
+  const v={primary:{background:"#16a34a",color:"#fff",border:"none"},danger:{background:"#ef4444",color:"#fff",border:"none"},ghost:{background:"transparent",color:"#374151",border:"1.5px solid #e5e7eb"}};
+  return <button {...props} style={{padding:"11px 20px",borderRadius:12,fontSize:14,fontWeight:600,display:"flex",alignItems:"center",gap:6,justifyContent:"center",...v[variant],...s}}>{children}</button>;
+}
+
+function TransactionForm({type,initial,onSave}){
+  const cats=type==="income"?INCOME_CATEGORIES:EXPENSE_CATEGORIES;
+  const [form,setForm]=useState({nominal:initial?.nominal??"",tanggal:initial?.tanggal??today(),kategori:initial?.kategori??cats[0],catatan:initial?.catatan??""});
+  const set=k=>e=>setForm(f=>({...f,[k]:e.target.value}));
+  const submit=()=>{
+    const nom=parseInt(String(form.nominal).replace(/\D/g,""),10);
+    if(!nom||nom<=0){alert("Masukkan nominal yang valid");return;}
+    onSave({...form,nominal:nom});
+  };
+  return <>
+    <Field label="Nominal (Rp)">
+      <input style={inputStyle} type="text" inputMode="numeric"
+        value={form.nominal?parseInt(String(form.nominal).replace(/\D/g,""),10).toLocaleString("id-ID"):""}
+        onChange={e=>setForm(f=>({...f,nominal:e.target.value.replace(/\D/g,"")}))} placeholder="Contoh: 150.000"/>
+    </Field>
+    <Field label="Tanggal"><input style={inputStyle} type="date" value={form.tanggal} onChange={set("tanggal")}/></Field>
+    <Field label="Kategori">
+      <select style={inputStyle} value={form.kategori} onChange={set("kategori")}>
+        {cats.map(c=><option key={c}>{c}</option>)}
+      </select>
+    </Field>
+    <Field label="Catatan (opsional)"><input style={inputStyle} value={form.catatan} onChange={set("catatan")} placeholder="Tambahkan catatan..."/></Field>
+    <Btn style={{width:"100%",marginTop:4}} onClick={submit}>Simpan</Btn>
+  </>;
+}
+
+function Dashboard({transactions,allocations,onAddIncome,onAddExpense}){
+  const [range,setRange] = useState("month");
+  const [dayEnd,setDayEnd] = useState(today());
+  const m=currentMonth();
+  const thisMonth=transactions.filter(t=>monthKey(t.tanggal)===m);
+  const totalIncome=transactions.filter(t=>t.type==="income").reduce((s,t)=>s+t.nominal,0);
+  const totalExpense=transactions.filter(t=>t.type==="expense").reduce((s,t)=>s+t.nominal,0);
+  const balance=totalIncome-totalExpense;
+  const mIncome=thisMonth.filter(t=>t.type==="income").reduce((s,t)=>s+t.nominal,0);
+  const mExpense=thisMonth.filter(t=>t.type==="expense").reduce((s,t)=>s+t.nominal,0);
+  const totalAllocated=allocations.reduce((s,a)=>s+a.amount,0);
+  const freeFund=balance-totalAllocated;
+  const recent=[...transactions].sort((a,b)=>b.tanggal.localeCompare(a.tanggal)).slice(0,5);
+  const rangeIncome = rangeTotal(transactions,range,"income", range==="day" ? dayEnd : null);
+  const rangeExpense = rangeTotal(transactions,range,"expense", range==="day" ? dayEnd : null);
+  const rangeBalance = rangeIncome - rangeExpense;
+  const chartData = useMemo(()=>buildExpenseBuckets(transactions,range, range==="day" ? dayEnd : null),[transactions,range,dayEnd]);
+  const maxChart = Math.max(...chartData.map(i=>i.amount),1);
+  const shiftDay = delta => setDayEnd(d=>toDateKey(addDays(parseIsoDate(d),delta)));
+
+  return <div style={{paddingBottom:90}}>
+    <div style={{background:"linear-gradient(135deg,#16a34a,#15803d)",borderRadius:20,padding:"24px 20px",marginBottom:20,color:"#fff"}}>
+      <div style={{fontSize:13,opacity:0.85,marginBottom:6}}>Saldo Saat Ini</div>
+      <div style={{fontSize:32,fontWeight:800,letterSpacing:-1}}>{formatRp(balance)}</div>
+      <div style={{marginTop:16,paddingTop:16,borderTop:"1px solid rgba(255,255,255,0.2)",display:"flex",justifyContent:"space-between"}}>
+        <div><div style={{fontSize:11,opacity:0.8}}>Dana Bebas</div><div style={{fontSize:16,fontWeight:700}}>{formatRp(Math.max(freeFund,0))}</div></div>
+        <div style={{textAlign:"right"}}><div style={{fontSize:11,opacity:0.8}}>Dialokasikan</div><div style={{fontSize:16,fontWeight:700}}>{formatRp(totalAllocated)}</div></div>
+      </div>
+    </div>
+
+    <div style={{display:"flex",gap:10,marginBottom:24}}>
+      <Btn style={{flex:1}} onClick={onAddIncome}>＋ Pemasukan</Btn>
+      <Btn variant="danger" style={{flex:1}} onClick={onAddExpense}>－ Pengeluaran</Btn>
+    </div>
+
+    <div style={{background:"#fff",borderRadius:20,padding:18,marginBottom:20,border:"1.5px solid #f0f0f0"}}>
+      <div style={{display:"flex",gap:8,flexWrap:"wrap",marginBottom:16}}>
+        {RANGE_OPTIONS.map(opt=>(
+          <button key={opt.key} onClick={()=>setRange(opt.key)} style={{border:opt.key===range?"1px solid #16a34a":"1px solid #e5e7eb",background:opt.key===range?"#eefdf3":"#fff",color:opt.key===range?"#166534":"#374151",borderRadius:999,padding:"8px 14px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{opt.label}</button>
+        ))}
+      </div>
+      {range==="day"&&<div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",marginBottom:16}}>
+        <Btn variant="ghost" style={{padding:"8px 12px"}} onClick={()=>shiftDay(-1)}>←</Btn>
+        <input style={{...inputStyle,maxWidth:180}} type="date" value={dayEnd} max={today()} onChange={e=>setDayEnd(e.target.value)}/>
+        <Btn variant="ghost" style={{padding:"8px 12px"}} onClick={()=>shiftDay(1)} disabled={dayEnd>=today()}>→</Btn>
+      </div>}
+      <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:16}}>
+        {[["Pemasukan",rangeIncome,"#16a34a"],["Pengeluaran",rangeExpense,"#ef4444"],["Saldo",rangeBalance,rangeBalance>=0?"#16a34a":"#ef4444"]].map(([label,value,color])=>(
+          <div key={label} style={{background:"#f8fafc",borderRadius:16,padding:"12px 14px",border:"1px solid #e5e7eb"}}>
+            <div style={{fontSize:11,color:"#6b7280",marginBottom:6,fontWeight:700}}>{label}</div>
+            <div style={{fontSize:17,fontWeight:700,color:color}}>{formatRp(value)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{fontSize:13,color:"#6b7280",marginBottom:10,fontWeight:600}}>Grafik Pengeluaran ({RANGE_OPTIONS.find(o=>o.key===range).label})</div>
+      <div style={{display:"flex",alignItems:"flex-end",gap:10,height:150,overflowX:"auto",paddingBottom:8}}>
+        {chartData.map(item=>(
+          <div key={item.key} style={{flex:"1 0 45px",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"flex-end",gap:8}}>
+            <div style={{width:28,height:Math.max(16,Math.round((item.amount/maxChart)*120)) + "px",background:"#ef4444",borderRadius:12,transition:"height .2s"}} />
+            <div style={{fontSize:10,color:"#6b7280",textAlign:"center",lineHeight:1.2}}>{item.label}</div>
+            <div style={{fontSize:11,fontWeight:700,color:"#111"}}>{formatRp(item.amount)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{marginTop:10,fontSize:12,color:"#6b7280"}}>Grafik hanya menampilkan data pengeluaran dari catatan kamu.</div>
+    </div>
+
+    <div style={{fontSize:13,color:"#6b7280",marginBottom:10,fontWeight:600}}>Bulan Ini — {monthLabel(m)}</div>
+    <div style={{display:"flex",gap:10,marginBottom:12}}>
+      {[["Pemasukan",mIncome,"#16a34a"],["Pengeluaran",mExpense,"#ef4444"]].map(([l,v,c])=>(
+        <div key={l} style={{background:"#fff",borderRadius:14,padding:"14px 16px",border:"1.5px solid #f0f0f0",flex:1}}>
+          <div style={{fontSize:12,color:"#6b7280",marginBottom:4}}>{l}</div>
+          <div style={{fontSize:18,fontWeight:700,color:c}}>{formatRp(v)}</div>
+        </div>
+      ))}
+    </div>
+    <div style={{background:"#fff",borderRadius:14,padding:"14px 16px",border:"1.5px solid #f0f0f0",marginBottom:20}}>
+      <div style={{fontSize:12,color:"#6b7280",marginBottom:4}}>Sisa Bulan Ini</div>
+      <div style={{fontSize:20,fontWeight:700,color:mIncome-mExpense>=0?"#16a34a":"#ef4444"}}>{formatRp(mIncome-mExpense)}</div>
+      <div style={{fontSize:11,color:mIncome-mExpense<0?"#ef4444":"#9ca3af",marginTop:3}}>{mIncome-mExpense<0?"⚠ Pengeluaran melebihi pemasukan":"Keuangan aman"}</div>
+    </div>
+    </div>
+
+    {recent.length>0&&<>
+      <div style={{fontSize:13,color:"#6b7280",marginBottom:10,fontWeight:600}}>Transaksi Terakhir</div>
+      <div style={{display:"flex",flexDirection:"column",gap:8}}>
+        {recent.map(t=>(
+          <div key={t.id} style={{background:"#fff",borderRadius:12,padding:"12px 14px",border:"1.5px solid #f0f0f0",display:"flex",alignItems:"center",gap:12}}>
+            <div style={{width:36,height:36,borderRadius:10,flexShrink:0,background:(CAT_COLORS[t.kategori]||"#6b7280")+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,color:CAT_COLORS[t.kategori]||"#6b7280",fontWeight:700}}>{t.type==="income"?"↑":"↓"}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontWeight:600,fontSize:14,color:"#111",whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{t.kategori}</div>
+              <div style={{fontSize:12,color:"#9ca3af"}}>{new Date(t.tanggal).toLocaleDateString("id-ID",{day:"numeric",month:"short"})}</div>
+            </div>
+            <div style={{fontWeight:700,fontSize:14,color:t.type==="income"?"#16a34a":"#ef4444",whiteSpace:"nowrap"}}>{t.type==="income"?"+":"-"}{formatRp(t.nominal)}</div>
+          </div>
+        ))}
+      </div>
+    </>}
+}
+
+function Transactions({transactions,onDelete,onEdit}){
+  const months=useMemo(()=>[...new Set(transactions.map(t=>monthKey(t.tanggal)))].sort((a,b)=>b.localeCompare(a)),[transactions]);
+  const [filterMonth,setFilterMonth]=useState(currentMonth());
+  const filtered=transactions.filter(t=>!filterMonth||monthKey(t.tanggal)===filterMonth).sort((a,b)=>b.tanggal.localeCompare(a.tanggal));
+  return <div style={{paddingBottom:90}}>
+    <div style={{marginBottom:16}}>
+      <select style={inputStyle} value={filterMonth} onChange={e=>setFilterMonth(e.target.value)}>
+        <option value="">Semua Bulan</option>
+        {months.map(m=><option key={m} value={m}>{monthLabel(m)}</option>)}
+      </select>
+    </div>
+    {filtered.length===0&&<div style={{textAlign:"center",padding:"48px 20px",color:"#9ca3af"}}><div style={{fontSize:40,marginBottom:12}}>📭</div><div style={{fontWeight:600}}>Belum ada transaksi</div><div style={{fontSize:13,marginTop:4}}>Tambahkan dari Dashboard</div></div>}
+    <div style={{display:"flex",flexDirection:"column",gap:8}}>
+      {filtered.map(t=>(
+        <div key={t.id} style={{background:"#fff",borderRadius:14,padding:"14px",border:"1.5px solid #f0f0f0"}}>
+          <div style={{display:"flex",alignItems:"flex-start",gap:12}}>
+            <div style={{width:40,height:40,borderRadius:12,flexShrink:0,background:(CAT_COLORS[t.kategori]||"#6b7280")+"22",display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,fontWeight:700,color:CAT_COLORS[t.kategori]||"#6b7280"}}>{t.type==="income"?"↑":"↓"}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",gap:8}}>
+                <div style={{fontWeight:600,fontSize:14,color:"#111"}}>{t.kategori}</div>
+                <div style={{fontWeight:700,fontSize:15,color:t.type==="income"?"#16a34a":"#ef4444",whiteSpace:"nowrap"}}>{t.type==="income"?"+":"-"}{formatRp(t.nominal)}</div>
+              </div>
+              <div style={{display:"flex",gap:8,marginTop:4,alignItems:"center"}}>
+                <Badge type={t.type}/>
+                <span style={{fontSize:12,color:"#9ca3af"}}>{new Date(t.tanggal).toLocaleDateString("id-ID",{day:"numeric",month:"short",year:"numeric"})}</span>
+              </div>
+              {t.catatan&&<div style={{fontSize:12,color:"#6b7280",marginTop:4}}>{t.catatan}</div>}
+            </div>
+          </div>
+          <div style={{display:"flex",gap:8,marginTop:10,paddingTop:10,borderTop:"1px solid #f3f4f6"}}>
+            <Btn variant="ghost" style={{flex:1,padding:"7px 12px",fontSize:13}} onClick={()=>onEdit(t)}>✏ Edit</Btn>
+            <Btn variant="ghost" style={{flex:1,padding:"7px 12px",fontSize:13,color:"#ef4444"}} onClick={()=>onDelete(t.id)}>🗑 Hapus</Btn>
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>;
+}
+
+function RAB({transactions,budgets,onSaveBudget}){
+  const m=currentMonth();
+  const [editCat,setEditCat]=useState(null);
+  const [editVal,setEditVal]=useState("");
+  const spendBycat={};
+  transactions.filter(t=>t.type==="expense"&&monthKey(t.tanggal)===m).forEach(t=>{spendBycat[t.kategori]=(spendBycat[t.kategori]||0)+t.nominal;});
+  const saveBudget=()=>{const v=parseInt(editVal.replace(/\D/g,""),10)||0;onSaveBudget(editCat,v);setEditCat(null);};
+  return <div style={{paddingBottom:90}}>
+    <div style={{fontSize:13,color:"#6b7280",marginBottom:16}}>Atur anggaran bulanan per kategori. Tap untuk mengubah.</div>
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {EXPENSE_CATEGORIES.map(cat=>{
+        const budget=budgets[cat]||0;const spent=spendBycat[cat]||0;
+        const pct=budget>0?Math.min((spent/budget)*100,100):0;
+        const over=spent>budget&&budget>0;
+        const barColor=over?"#ef4444":pct>75?"#f97316":"#16a34a";
+        return <div key={cat} style={{background:over?"#fff5f5":"#fff",borderRadius:14,padding:"14px",border:over?"1.5px solid #fca5a5":"1.5px solid #f0f0f0"}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+            <div><div style={{fontWeight:600,fontSize:14,color:"#111"}}>{cat}</div>{over&&<div style={{fontSize:11,color:"#ef4444",fontWeight:600}}>⚠ Melebihi anggaran!</div>}</div>
+            <button onClick={()=>{setEditCat(cat);setEditVal(budget?budget.toLocaleString("id-ID"):"");}} style={{background:"#f3f4f6",border:"none",borderRadius:8,padding:"5px 12px",fontSize:12,cursor:"pointer",color:"#374151"}}>{budget?"Ubah":"Set"}</button>
+          </div>
+          {budget>0&&<>
+            <div style={{background:"#f3f4f6",borderRadius:99,height:6,overflow:"hidden",marginBottom:8}}><div style={{width:pct+"%",height:"100%",background:barColor,borderRadius:99}}/></div>
+            <div style={{display:"flex",justifyContent:"space-between",fontSize:12}}>
+              <span style={{color:"#6b7280"}}>Terpakai: <b style={{color:over?"#ef4444":"#111"}}>{formatRp(spent)}</b></span>
+              <span style={{color:"#6b7280"}}>Sisa: <b style={{color:over?"#ef4444":"#16a34a"}}>{over?"-"+formatRp(spent-budget):formatRp(budget-spent)}</b></span>
+            </div>
+            <div style={{fontSize:11,color:"#9ca3af",marginTop:2}}>Budget: {formatRp(budget)}</div>
+          </>}
+          {!budget&&<div style={{fontSize:12,color:"#9ca3af"}}>Belum ada anggaran</div>}
+        </div>;
+      })}
+    </div>
+    {editCat&&<Modal title={`Anggaran: ${editCat}`} onClose={()=>setEditCat(null)}>
+      <Field label="Jumlah Anggaran (Rp)">
+        <input style={inputStyle} type="text" inputMode="numeric"
+          value={editVal?parseInt(editVal.replace(/\D/g,""),10).toLocaleString("id-ID"):""}
+          onChange={e=>setEditVal(e.target.value.replace(/\D/g,""))} placeholder="Contoh: 500.000"/>
+      </Field>
+      <div style={{display:"flex",gap:10}}><Btn variant="ghost" style={{flex:1}} onClick={()=>setEditCat(null)}>Batal</Btn><Btn style={{flex:1}} onClick={saveBudget}>Simpan</Btn></div>
+    </Modal>}
+  </div>;
+}
+
+function Allocation({transactions,allocations,onSave,onDelete}){
+  const [showForm,setShowForm]=useState(false);
+  const [editItem,setEditItem]=useState(null);
+  const [form,setForm]=useState({label:"",amount:"",icon:"🎯"});
+  const ICONS=["🎓","💻","✈","🛡","🏠","🚗","💍","🎸","🏋","📚","🎯","💰"];
+  const totalIncome=transactions.filter(t=>t.type==="income").reduce((s,t)=>s+t.nominal,0);
+  const totalExpense=transactions.filter(t=>t.type==="expense").reduce((s,t)=>s+t.nominal,0);
+  const balance=totalIncome-totalExpense;
+  const totalAllocated=allocations.reduce((s,a)=>s+a.amount,0);
+  const freeFund=balance-totalAllocated;
+  const openEdit=item=>{setEditItem(item);setForm({label:item.label,amount:item.amount.toLocaleString("id-ID"),icon:item.icon||"🎯"});setShowForm(true);};
+  const submit=()=>{
+    const amt=parseInt(String(form.amount).replace(/\D/g,""),10);
+    if(!form.label.trim()){alert("Masukkan nama alokasi");return;}
+    if(!amt||amt<=0){alert("Masukkan jumlah yang valid");return;}
+    onSave({id:editItem?.id||uid(),label:form.label.trim(),amount:amt,icon:form.icon},!!editItem);
+    setShowForm(false);setEditItem(null);setForm({label:"",amount:"",icon:"🎯"});
+  };
+  return <div style={{paddingBottom:90}}>
+    <div style={{background:"#fff",borderRadius:16,padding:16,marginBottom:20,border:"1.5px solid #f0f0f0"}}>
+      {[["Total Saldo",balance,"#111"],["Dialokasikan",totalAllocated,"#f97316"]].map(([l,v,c])=>(
+        <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:8}}><span style={{fontSize:13,color:"#6b7280"}}>{l}</span><span style={{fontWeight:700,color:c}}>{formatRp(v)}</span></div>
+      ))}
+      <div style={{borderTop:"1px solid #f3f4f6",paddingTop:8,display:"flex",justifyContent:"space-between"}}>
+        <span style={{fontSize:14,fontWeight:600,color:"#111"}}>Dana Bebas</span>
+        <span style={{fontWeight:800,color:freeFund>=0?"#16a34a":"#ef4444",fontSize:16}}>{freeFund<0?"-":""}{formatRp(Math.abs(freeFund))}</span>
+      </div>
+      {freeFund<0&&<div style={{fontSize:12,color:"#ef4444",marginTop:6}}>⚠ Alokasi melebihi saldo!</div>}
+    </div>
+    <Btn style={{width:"100%",marginBottom:16}} onClick={()=>{setShowForm(true);setEditItem(null);setForm({label:"",amount:"",icon:"🎯"});}}>＋ Tambah Alokasi</Btn>
+    {allocations.length===0&&<div style={{textAlign:"center",padding:"48px 20px",color:"#9ca3af"}}><div style={{fontSize:40,marginBottom:12}}>🏦</div><div style={{fontWeight:600}}>Belum ada alokasi dana</div><div style={{fontSize:13,marginTop:4}}>Tambahkan tujuan tabungan kamu</div></div>}
+    <div style={{display:"flex",flexDirection:"column",gap:10}}>
+      {allocations.map(a=>{
+        const pct=balance>0?Math.min((a.amount/balance)*100,100):0;
+        return <div key={a.id} style={{background:"#fff",borderRadius:14,padding:14,border:"1.5px solid #f0f0f0"}}>
+          <div style={{display:"flex",alignItems:"center",gap:12,marginBottom:10}}>
+            <div style={{width:44,height:44,borderRadius:12,background:"#f0fdf4",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>{a.icon||"🎯"}</div>
+            <div style={{flex:1}}><div style={{fontWeight:600,fontSize:15,color:"#111"}}>{a.label}</div><div style={{fontWeight:700,fontSize:17,color:"#16a34a"}}>{formatRp(a.amount)}</div></div>
+          </div>
+          <div style={{background:"#f3f4f6",borderRadius:99,height:5,overflow:"hidden",marginBottom:6}}><div style={{width:pct+"%",height:"100%",background:"#16a34a",borderRadius:99}}/></div>
+          <div style={{fontSize:11,color:"#9ca3af",marginBottom:10}}>{pct.toFixed(1)}% dari total saldo</div>
+          <div style={{display:"flex",gap:8}}>
+            <Btn variant="ghost" style={{flex:1,padding:"7px",fontSize:13}} onClick={()=>openEdit(a)}>✏ Edit</Btn>
+            <Btn variant="ghost" style={{flex:1,padding:"7px",fontSize:13,color:"#ef4444"}} onClick={()=>onDelete(a.id)}>🗑 Hapus</Btn>
+          </div>
+        </div>;
+      })}
+    </div>
+    {showForm&&<Modal title={editItem?"Edit Alokasi":"Tambah Alokasi"} onClose={()=>{setShowForm(false);setEditItem(null);}}>
+      <div style={{marginBottom:14}}>
+        <label style={{display:"block",fontSize:13,color:"#4b5563",marginBottom:8,fontWeight:500}}>Ikon</label>
+        <div style={{display:"flex",flexWrap:"wrap",gap:8}}>
+          {ICONS.map(ic=><button key={ic} onClick={()=>setForm(f=>({...f,icon:ic}))} style={{width:40,height:40,borderRadius:10,fontSize:20,border:"2px solid",borderColor:form.icon===ic?"#16a34a":"#e5e7eb",background:form.icon===ic?"#f0fdf4":"#fff",cursor:"pointer"}}>{ic}</button>)}
+        </div>
+      </div>
+      <Field label="Nama Tujuan"><input style={inputStyle} value={form.label} onChange={e=>setForm(f=>({...f,label:e.target.value}))} placeholder="Contoh: Dana Darurat"/></Field>
+      <Field label="Jumlah (Rp)">
+        <input style={inputStyle} type="text" inputMode="numeric"
+          value={form.amount?parseInt(String(form.amount).replace(/\D/g,""),10).toLocaleString("id-ID"):""}
+          onChange={e=>setForm(f=>({...f,amount:e.target.value.replace(/\D/g,"")}))} placeholder="Contoh: 1.000.000"/>
+      </Field>
+      <div style={{display:"flex",gap:10}}><Btn variant="ghost" style={{flex:1}} onClick={()=>{setShowForm(false);setEditItem(null);}}>Batal</Btn><Btn style={{flex:1}} onClick={submit}>Simpan</Btn></div>
+    </Modal>}
+  </div>;
+}
+
+function Ekspor({ transactions, budgets, allocations }){
+  const exportJson = () => {
+    const data = { transactions, budgets, allocations };
+    downloadBlob(JSON.stringify(data, null, 2), `catatan-keuangan-${new Date().toISOString().slice(0,10)}.json`, 'application/json');
+  };
+
+  const exportCsv = () => {
+    const transactionRows = transactions.map(t => ({
+      tanggal: t.tanggal,
+      tipe: t.type === 'income' ? 'Pemasukan' : 'Pengeluaran',
+      kategori: t.kategori,
+      nominal: formatRp(t.nominal),
+      catatan: t.catatan || '',
+    }));
+    const budgetRows = Object.entries(budgets).map(([kategori, jumlah]) => ({ kategori, jumlah: formatRp(jumlah), catatan: '' }));
+    const allocationRows = allocations.map(a => ({ label: a.label, jumlah: formatRp(a.amount), catatan: '' }));
+
+    const sections = [
+      'Transaksi',
+      buildCsvSection(transactionRows, [
+        { label: 'Tanggal', key: 'tanggal' },
+        { label: 'Tipe', key: 'tipe' },
+        { label: 'Kategori', key: 'kategori' },
+        { label: 'Nominal', key: 'nominal' },
+        { label: 'Catatan', key: 'catatan' },
+      ]),
+      '',
+      'Anggaran',
+      buildCsvSection(budgetRows, [
+        { label: 'Kategori', key: 'kategori' },
+        { label: 'Anggaran (Rp)', key: 'jumlah' },
+        { label: 'Catatan', key: 'catatan' },
+      ]),
+      '',
+      'Alokasi',
+      buildCsvSection(allocationRows, [
+        { label: 'Label', key: 'label' },
+        { label: 'Jumlah (Rp)', key: 'jumlah' },
+        { label: 'Catatan', key: 'catatan' },
+      ]),
+    ].join('\r\n');
+
+    downloadBlob(CSV_BOM + sections, `catatan-keuangan-${new Date().toISOString().slice(0,10)}.csv`, 'text/csv;charset=utf-8');
+  };
+
+  const exportBoth = () => {
+    exportJson();
+    exportCsv();
+  };
+
+  return (
+    <div style={{paddingBottom:90}}>
+      <div style={{background:'#fff',borderRadius:16,padding:20,border:'1.5px solid #f0f0f0'}}>
+        <div style={{marginBottom:16,fontSize:14,color:'#374151'}}>Ekspor semua data transaksi, anggaran, dan alokasi sekaligus ke JSON + CSV untuk backup dan Excel.</div>
+        <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:10}}>
+          <Btn style={{width:'100%'}} onClick={exportBoth}>Ekspor JSON + CSV</Btn>
+          <Btn style={{width:'100%'}} onClick={exportJson}>Ekspor JSON</Btn>
+          <Btn variant='ghost' style={{width:'100%'}} onClick={exportCsv}>Ekspor CSV</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function App(){
+  const [activeTab,setActiveTab]=useState("Dashboard");
+  const [transactions,setTransactions]=useState(()=>load("keu_transactions",[]));
+  const [budgets,setBudgets]=useState(()=>load("keu_budgets",{}));
+  const [allocations,setAllocations]=useState(()=>load("keu_allocations",[]));
+  const [modal,setModal]=useState(null);
+
+  useEffect(()=>save("keu_transactions",transactions),[transactions]);
+  useEffect(()=>save("keu_budgets",budgets),[budgets]);
+  useEffect(()=>save("keu_allocations",allocations),[allocations]);
+
+  const addTransaction=data=>{
+    const t={id:uid(),type:modal.type,...data};
+    if(modal.editItem) setTransactions(ts=>ts.map(x=>x.id===modal.editItem.id?{...x,...data,type:modal.type}:x));
+    else setTransactions(ts=>[t,...ts]);
+    setModal(null);
+  };
+  const deleteTransaction=id=>{ if(window.confirm("Hapus transaksi ini?")) setTransactions(ts=>ts.filter(t=>t.id!==id)); };
+  const saveAllocation=(item,isEdit)=>{ if(isEdit) setAllocations(as=>as.map(a=>a.id===item.id?item:a)); else setAllocations(as=>[...as,item]); };
+  const deleteAllocation=id=>{ if(window.confirm("Hapus alokasi ini?")) setAllocations(as=>as.filter(a=>a.id!==id)); };
+
+  return (
+    <div style={{fontFamily:"'Segoe UI',system-ui,sans-serif",background:"#f8f9fb",minHeight:"100vh",maxWidth:480,margin:"0 auto"}}>
+      <div style={{background:"#fff",padding:"16px 20px 12px",borderBottom:"1px solid #f0f0f0",position:"sticky",top:0,zIndex:50}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+          <div>
+            <div style={{fontSize:11,color:"#9ca3af",letterSpacing:1,textTransform:"uppercase"}}>Keuangan Pribadi</div>
+            <h1 style={{margin:0,fontSize:20,fontWeight:800,color:"#111"}}>Dompet Saya 💚</h1>
+          </div>
+        </div>
+      </div>
+
+      <div style={{padding:"16px 16px 0"}}>
+        {activeTab==="Dashboard"&&<Dashboard transactions={transactions} allocations={allocations} onAddIncome={()=>setModal({type:"income"})} onAddExpense={()=>setModal({type:"expense"})}/>}
+        {activeTab==="Transaksi"&&<Transactions transactions={transactions} onDelete={deleteTransaction} onEdit={t=>setModal({type:t.type,editItem:t})}/>}
+        {activeTab==="RAB"&&<RAB transactions={transactions} budgets={budgets} onSaveBudget={(cat,val)=>setBudgets(b=>({...b,[cat]:val}))}/>}
+        {activeTab==="Alokasi"&&<Allocation transactions={transactions} allocations={allocations} onSave={saveAllocation} onDelete={deleteAllocation}/>}
+        {activeTab==="Ekspor"&&<Ekspor transactions={transactions} budgets={budgets} allocations={allocations}/>}
+      </div>
+
+      <div style={{position:"fixed",bottom:0,left:"50%",transform:"translateX(-50%)",width:"100%",maxWidth:480,background:"#fff",borderTop:"1px solid #f0f0f0",display:"flex",zIndex:50}}>
+        {TABS.map(tab=>(
+          <button key={tab} onClick={()=>setActiveTab(tab)} style={{flex:1,padding:"10px 4px 12px",border:"none",background:"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:3}}>
+            <span style={{fontSize:20}}>{TAB_ICONS[tab]}</span>
+            <span style={{fontSize:10,fontWeight:600,color:activeTab===tab?"#16a34a":"#9ca3af"}}>{tab}</span>
+            {activeTab===tab&&<div style={{width:4,height:4,borderRadius:99,background:"#16a34a",marginTop:-2}}/>}
+          </button>
+        ))}
+      </div>
+
+      {modal&&<Modal title={modal.editItem?(modal.type==="income"?"Edit Pemasukan":"Edit Pengeluaran"):(modal.type==="income"?"Tambah Pemasukan":"Tambah Pengeluaran")} onClose={()=>setModal(null)}>
+        <div style={{display:"inline-block",padding:"4px 12px",borderRadius:99,background:modal.type==="income"?"#dcfce7":"#fee2e2",color:modal.type==="income"?"#15803d":"#dc2626",fontSize:12,fontWeight:600,marginBottom:16}}>
+          {modal.type==="income"?"💚 Pemasukan":"❤ Pengeluaran"}
+        </div>
+        <TransactionForm type={modal.type} initial={modal.editItem} onSave={addTransaction}/>
+      </Modal>}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch(err => console.warn('SW registration failed:', err));
+  });
+}
+</script>
+</body>
+</html>
